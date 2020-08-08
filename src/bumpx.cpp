@@ -1,6 +1,6 @@
 // iOrange, 2020
 // takes normalmap + optional gloss and height maps and outputs bump and bump# textures for Stalker and Metro 2033 build 375 games
-// v0.2
+// Current version v0.4
 
 #include <iostream>
 #include <string>
@@ -28,6 +28,24 @@ using BytesArray = std::vector<uint8_t>;
 
 #define STB_DXT_IMPLEMENTATION
 #include "stb_dxt.h"
+
+
+#define SQUISH_USE_SSE 2
+#include "squish/squish.h"
+#include "squish/maths.cpp"
+#include "squish/alpha.cpp"
+#include "squish/clusterfit.cpp"
+#include "squish/colourblock.cpp"
+#include "squish/colourfit.cpp"
+#include "squish/colourset.cpp"
+#include "squish/rangefit.cpp"
+#include "squish/singlecolourfit.cpp"
+#include "squish/squish.cpp"
+
+
+#define RGBCX_IMPLEMENTATION
+#include "rgbcx.h"
+
 
 
 #ifdef _WIN32
@@ -79,8 +97,9 @@ constexpr size_t IsPowerOfTwo(const size_t v) {
 
 
 static void PrintUsage() {
-    Cout << _T("Usage: bumpx -n:path_to_normalmap -g:path_to_glossmap -h:path_to_heightmap -l:g -o:output") << std::endl;
+    Cout << _T("Usage: bumpx -n:path_to_normalmap -g:path_to_glossmap -h:path_to_heightmap -l:g -q:quality -o:output") << std::endl;
     Cout << _T("       here glossmap and heightmap can be ommited") << std::endl;
+    Cout << _T("       -q:0 - fast compression, worst quality, -q:2 - slowest compression, best quality (default)") << std::endl;
     Cout << _T("       -l:g flag forces gloss to be stored in linear rather than log") << std::endl;
     Cout << _T("       if no output path provided - the output files will have same name as source and saved to the same folder") << std::endl;
     Cout << std::endl;
@@ -293,7 +312,7 @@ static void BuildMipchain(Texture<T>& texture) {
     }
 }
 
-void CompressBC3(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
+void CompressBC3_STB(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
     const uint8_t* srcPtr = rcast<const uint8_t*>(bmp.pixels.data());
     uint8_t* dst = rcast<uint8_t*>(outBlocks);
 
@@ -308,6 +327,46 @@ void CompressBC3(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
             }
 
             stb_compress_dxt_block(dst, pixelsBlock, 1, STB_DXT_HIGHQUAL);
+            dst += 16;
+        }
+    }
+}
+
+void CompressBC3_Squish(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
+    const uint8_t* srcPtr = rcast<const uint8_t*>(bmp.pixels.data());
+    uint8_t* dst = rcast<uint8_t*>(outBlocks);
+
+    uint8_t pixelsBlock[16 * 4] = { 0 };
+
+    for (size_t y = 0; y < bmp.height; y += 4) {
+        for (size_t x = 0; x < bmp.width; x += 4) {
+            const uint8_t* src = srcPtr + (y * bmp.width + x) * 4;
+            for (size_t i = 0; i < 4; ++i) {
+                std::memcpy(&pixelsBlock[i * 16], src, 16);
+                src += (bmp.width * 4);
+            }
+
+            squish::Compress(pixelsBlock, dst, squish::kDxt5 | squish::kColourIterativeClusterFit);
+            dst += 16;
+        }
+    }
+}
+
+void CompressBC3_RGBCX(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
+    const uint8_t* srcPtr = rcast<const uint8_t*>(bmp.pixels.data());
+    uint8_t* dst = rcast<uint8_t*>(outBlocks);
+
+    uint8_t pixelsBlock[16 * 4] = { 0 };
+
+    for (size_t y = 0; y < bmp.height; y += 4) {
+        for (size_t x = 0; x < bmp.width; x += 4) {
+            const uint8_t* src = srcPtr + (y * bmp.width + x) * 4;
+            for (size_t i = 0; i < 4; ++i) {
+                std::memcpy(&pixelsBlock[i * 16], src, 16);
+                src += (bmp.width * 4);
+            }
+
+            rgbcx::encode_bc3(rgbcx::MAX_LEVEL, dst, pixelsBlock);
             dst += 16;
         }
     }
@@ -388,7 +447,7 @@ void DecodeBC3AlphaBlock(uint8_t* dest, const size_t w, const size_t h, const si
     }
 }
 
-void DecompressBC3(const void* inputBlocks, Bitmap<PixelRgba>& output) {
+void DecompressBC3_MY(const void* inputBlocks, Bitmap<PixelRgba>& output) {
     const uint8_t* src = rcast<const uint8_t*>(inputBlocks);
     uint8_t* dest = rcast<uint8_t*>(output.pixels.data());
 
@@ -404,6 +463,7 @@ void DecompressBC3(const void* inputBlocks, Bitmap<PixelRgba>& output) {
         }
     }
 }
+
 
 // "DDS "
 const uint32_t kDDSFileSignature = 0x20534444;
@@ -491,14 +551,15 @@ int Main(int argc, Char** argv) {
     if (argc <= 1 || (argc > 1 && String(_T("-help")) == argv[1])) {
         PrintUsage();
     } else {
-        String paramN, paramG, paramH, paramO, paramL;
+        String paramN, paramG, paramH, paramO, paramL, paramQ;
 
         std::vector<std::pair<Char, String*>> paramsMap = {
             { _T('n'), &paramN },
             { _T('g'), &paramG },
             { _T('h'), &paramH },
             { _T('o'), &paramO },
-            { _T('l'), &paramL }
+            { _T('l'), &paramL },
+            { _T('q'), &paramQ }
         };
 
         Char** it = argv, **end = argv + argc;
@@ -526,6 +587,9 @@ int Main(int argc, Char** argv) {
         }
 
         const bool linearGloss = !paramL.empty() && paramL.front() == _T('g');
+        const int quality = !paramQ.empty() ? std::stoi(paramQ) : 2;
+
+        Cout << _T("Using quality level ") << quality << std::endl;
 
         fs::path pathNormalmap, pathGlossmap, pathHeightmap, pathOutput;
 
@@ -569,7 +633,7 @@ int Main(int argc, Char** argv) {
             fileStatus = fs::status(pathHeightmap, errorCode);
             if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
                 Cout << _T("Provided heightmap path does not exist or not a valid file.") << std::endl;
-                Cout << _T("This is not a showstopper, just height will be omitted from the result.") << std::endl;
+                Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
                 pathHeightmap.clear();
             }
         }
@@ -597,12 +661,20 @@ int Main(int argc, Char** argv) {
 
         if (heightmap.empty() && !heightmap.height) {
             Cout << _T("Couldn't load heightmap, not an image or unsupported format?") << std::endl;
-            Cout << _T("This is not a showstopper, just height will be omitted from the result.") << std::endl;
+            Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
         } else if (heightmap.width != normalmap.width || heightmap.height != normalmap.height) {
             Cout << _T("Heightmap has different dimensions than normalmap!") << std::endl;
-            Cout << _T("This is not a showstopper, just height will be omitted from the result.") << std::endl;
+            Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
             heightmap.clear();
         }
+
+        // make default heightmap
+        if (heightmap.empty()) {
+            heightmap = Bitmap<PixelMono>(normalmap.width, normalmap.height, { 128 });
+        }
+
+        //rgbcx::init(rgbcx::bc1_approx_mode::cBC1IdealRound4);
+        rgbcx::init(rgbcx::bc1_approx_mode::cBC1NVidia);
 
         const size_t nwidth = normalmap.width;
         const size_t nheight = normalmap.height;
@@ -663,7 +735,19 @@ int Main(int argc, Char** argv) {
 
             const size_t compressedMipSize = ((normalMip.width / 4) * (normalMip.height / 4)) * 16;
             compressedMip.resize(compressedMipSize);
-            CompressBC3(normalMip, compressedMip.data());
+
+            switch (quality) {
+                case 0:
+                    CompressBC3_STB(normalMip, compressedMip.data());
+                    break;
+                case 1:
+                    CompressBC3_Squish(normalMip, compressedMip.data());
+                    break;
+                case 2:
+                default:
+                    CompressBC3_RGBCX(normalMip, compressedMip.data());
+                    break;
+            }
 
             const size_t originalMipSize = normalMip.width * normalMip.height * BytesPerPixel<PixelRgba>();
             Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
@@ -679,7 +763,7 @@ int Main(int argc, Char** argv) {
             auto& bumpXMip = bumpXWithMips.mips[i];
 
             Cout << _T("Calculating error for mip ") << i << _T("...") << std::endl;
-            DecompressBC3(compressedMip.data(), bumpXMip);
+            DecompressBC3_MY(compressedMip.data(), bumpXMip);
 
             // calculate the difference and un-swizzle back to RGB
             std::transform(normalMip.pixels.begin(),
@@ -717,7 +801,19 @@ int Main(int argc, Char** argv) {
 
             const size_t compressedMipSize = ((bumpXMip.width / 4) * (bumpXMip.height / 4)) * 16;
             compressedMip.resize(compressedMipSize);
-            CompressBC3(bumpXMip, compressedMip.data());
+
+            switch (quality) {
+                case 0:
+                    CompressBC3_STB(bumpXMip, compressedMip.data());
+                    break;
+                case 1:
+                    CompressBC3_Squish(bumpXMip, compressedMip.data());
+                    break;
+                case 2:
+                default:
+                    CompressBC3_RGBCX(bumpXMip, compressedMip.data());
+                    break;
+            }
 
             const size_t originalMipSize = bumpXMip.width * bumpXMip.height * BytesPerPixel<PixelRgba>();
             Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
@@ -744,3 +840,10 @@ int Main(int argc, Char** argv) {
 
     return 0;
 }
+
+
+// Changelog:
+// v0.1 - Initial release
+// v0.2 - added "-l:g" option to store gloss in linear vs exponent
+// v0.3 - added Squish BC compression for better quality
+// v0.4 - added RGBCX BC compression for even better quality

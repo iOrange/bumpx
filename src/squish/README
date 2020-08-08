@@ -1,0 +1,66 @@
+LICENSE
+-------
+
+The squish library is distributed under the terms and conditions of the MIT
+license. This license is specified at the top of each source file and must be
+preserved in its entirety.
+
+FIXED TABLES 
+------------
+
+This fork of the original library contains fixed solid color tables for 3 and
+4 color blocks. The original tables did not factor in the up to 3% error allowed
+by actual GPU BC1 decoding hardware, leading to noticeable artifacts on some textures.
+More information is here: 
+http://www.ludicon.com/castano/blog/2009/03/gpu-dxt-decompression/
+
+To use the original tables, set SQUISH_USE_ORIGINAL_TABLES to 1 in singlecolourfit.cpp.
+
+Average across 101 test textures:
+
+Original/bad tables:
+Ideal BC1 PSNR: 36.504513 dB, std dev: 7.569236
+NVidia BC1 PSNR: 36.391151 dB, std dev: 7.389989
+
+Fixed (this fork):
+Ideal BC1 PSNR: 36.498199 dB, std dev: 7.555960
+NVidia BC1 PSNR: 36.462097 dB, std dev: 7.475064
+
+This is across 101 textures. Some textures are impacted more than others. One example (a grayscale texture):
+
+Original:
+Ideal BC1 PSNR: 46.656 dB
+NVidia BC1 PSNR: 43.203 dB
+
+Fixed:
+Ideal BC1 PSNR: 46.625 dB
+NVidia BC1 PSNR: 45.410 dB
+
+BUILDING AND INSTALLING THE LIBRARY
+-----------------------------------
+
+If you are using Visual Studio 2003 or above under Windows then load the Visual
+Studio 2003 project in the vs7 folder. By default, the library is built using
+SSE2 optimisations. To change this either change or remove the SQUISH_USE_SSE=2
+from the preprocessor symbols.
+
+If you are using a Mac then load the Xcode 2.2 project in the distribution. By
+default, the library is built using Altivec optimisations. To change this
+either change or remove SQUISH_USE_ALTIVEC=1 from the preprocessor symbols. I
+guess I'll have to think about changing this for the new Intel Macs that are
+rolling out...
+
+If you are using unix then first edit the config file in the base directory of
+the distribution, enabling Altivec or SSE with the USE_ALTIVEC or USE_SSE
+variables, and editing the optimisation flags passed to the C++ compiler if
+necessary. Then make can be used to build the library, and make install (from
+the superuser account) can be used to install (into /usr/local by default).
+
+REPORTING BUGS OR FEATURE REQUESTS
+----------------------------------
+
+Feedback can be sent to Simon Brown (the developer) at si@sjbrown.co.uk
+
+New releases are announced on the squish library homepage at
+http://sjbrown.co.uk/?code=squish
+
