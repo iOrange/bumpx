@@ -292,6 +292,7 @@ typedef enum
     STBIR_FILTER_CUBICBSPLINE = 3,  // The cubic b-spline (aka Mitchell-Netrevalli with B=1,C=0), gaussian-esque
     STBIR_FILTER_CATMULLROM   = 4,  // An interpolating cubic spline
     STBIR_FILTER_MITCHELL     = 5,  // Mitchell-Netrevalli filter with B=1/3, C=1/3
+    STBIR_FILTER_KAISER       = 6,  // Kaiser
 } stbir_filter;
 
 typedef enum
@@ -580,6 +581,25 @@ static stbir__inline float stbir__saturate(float x)
     return x;
 }
 
+static float stbir__sinc(float x)
+{
+    x = (x * 3.14159265359f);
+
+    if ((x < 0.01f) && (x > -0.01f))
+        return 1.0f + x*x*(-1.0f/6.0f + x*x*1.0f/120.0f);
+
+    return (float)sin(x) / x;
+}
+
+static float stbir__clean(float t)
+{
+    const float EPSILON = 0.0000125f;
+    if (fabs(t) < EPSILON)
+        return (0.0f);
+
+    return t;
+}
+
 #ifdef STBIR_SATURATE_INT
 static stbir__inline stbir_uint8 stbir__saturate8(int x)
 {
@@ -836,6 +856,54 @@ static float stbir__filter_mitchell(float x, float s)
     return (0.0f);
 }
 
+
+static float stbir__bessel0(float x)
+{
+    const float EPSILON_RATIO = 1E-6f;
+    float xh, sum, pow, ds;
+    int k;
+
+    xh = 0.5f * x;
+    sum = 1.0f;
+    pow = 1.0f;
+    k = 0;
+    ds = 1.0f;
+    while (ds > sum * EPSILON_RATIO) // FIXME: Shouldn't this stop after X iterations for max. safety?
+    {
+        ++k;
+        pow = pow * (xh / k);
+        ds = pow * pow;
+        sum = sum + ds;
+    }
+
+    return sum;
+}
+
+static float stbir__kaiser(float alpha, float half_width, float x)
+{
+   const float ratio = (x / half_width);
+   return stbir__bessel0(alpha * sqrt(1 - ratio * ratio)) / stbir__bessel0(alpha);
+}
+
+#define STBIR__KAISER_SUPPORT 3
+static float stbir__filter_kaiser(float x, float s)
+{
+    STBIR__UNUSED_PARAM(s);
+
+    if (x < 0.0f)
+        x = -x;
+
+    if(x < STBIR__KAISER_SUPPORT)
+    {
+         // db atten
+        const float att = 40.0f;
+        const float alpha = (float)(exp(log(0.58417f * (att - 20.96f)) * 0.4f) + 0.07886f * (att - 20.96f));
+        return stbir__clean(stbir__sinc(x) * stbir__kaiser(alpha, STBIR__KAISER_SUPPORT, x));
+    }
+
+    return (0.0f);
+}
+
 static float stbir__support_zero(float s)
 {
     STBIR__UNUSED_PARAM(s);
@@ -861,6 +929,7 @@ static stbir__filter_info stbir__filter_info_table[] = {
         { stbir__filter_cubic,      stbir__support_two },
         { stbir__filter_catmullrom, stbir__support_two },
         { stbir__filter_mitchell,   stbir__support_two },
+        { stbir__filter_kaiser,     stbir__support_two },
 };
 
 stbir__inline static int stbir__use_upsampling(float ratio)
