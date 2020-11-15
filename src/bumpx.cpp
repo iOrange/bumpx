@@ -1,6 +1,6 @@
 // iOrange, 2020
 // takes normalmap + optional gloss and height maps and outputs bump and bump# textures for Stalker and Metro 2033 build 375 games
-// Current version v0.4
+// Current version v0.5
 
 #include <iostream>
 #include <string>
@@ -702,7 +702,7 @@ int Main(int argc, Char** argv) {
             Cout << _T("Successfully created ") << heightmapWithMips.mips.size() << _T(" mips") << std::endl;
         }
 
-        // step 2: assemble stalker normalmap 
+        // step 2: assemble stalker normalmap
         Cout << _T("Assembling stalker bump (a - NX, b - NY, g - NZ, r - Gloss)...") << std::endl;
         for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
             auto& normalMip = normalmapWithMips.mips[i];
@@ -843,7 +843,8 @@ int Main(int argc, Char** argv) {
 
 
 // Changelog:
-// v0.1 - Initial release
-// v0.2 - added "-l:g" option to store gloss in linear vs exponent
-// v0.3 - added Squish BC compression for better quality
+// v0.5 - added Kaiser resample filter to stbi_image_resize library and using it by default now
 // v0.4 - added RGBCX BC compression for even better quality
+// v0.3 - added Squish BC compression for better quality
+// v0.2 - added "-l:g" option to store gloss in linear vs exponent
+// v0.1 - Initial release
