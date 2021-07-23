@@ -22,6 +22,13 @@ using BytesArray = std::vector<uint8_t>;
 #define STBI_NO_HDR
 #include "stb_image.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBIW_WINDOWS_UTF8
+#ifdef _WIN32
+#define __STDC_LIB_EXT1__
+#endif
+#include "stb_image_write.h"
+
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #define STBIR_DEFAULT_FILTER_DOWNSAMPLE  STBIR_FILTER_KAISER
 #include "stb_image_resize.h"
@@ -96,12 +103,22 @@ constexpr size_t IsPowerOfTwo(const size_t v) {
 }
 
 
+inline bool StrEndsWith(const String& str, const String& ending) {
+    return str.size() >= ending.size() && str.compare(str.size() - ending.size(), ending.size(), ending) == 0;
+}
+
+
 static void PrintUsage() {
-    Cout << _T("Usage: bumpx -n:path_to_normalmap -g:path_to_glossmap -h:path_to_heightmap -l:g -q:quality -o:output") << std::endl;
+    Cout << _T("Usage:") << std::endl;
+    Cout << _T("  Mode 1 - Bump packing:") << std::endl;
+    Cout << _T("    bumpx -n:path_to_normalmap -g:path_to_glossmap -h:path_to_heightmap -l:g -q:quality -o:output") << std::endl;
     Cout << _T("       here glossmap and heightmap can be ommited") << std::endl;
     Cout << _T("       -q:0 - fast compression, worst quality, -q:2 - slowest compression, best quality (default)") << std::endl;
     Cout << _T("       -l:g flag forces gloss to be stored in linear rather than log") << std::endl;
     Cout << _T("       if no output path provided - the output files will have same name as source and saved to the same folder") << std::endl;
+    Cout << std::endl;
+    Cout << _T("  Mode 2 - Bump unpacking:") << std::endl;
+    Cout << _T("    bumpx path_to_bump.dds output_folder_path") << std::endl;
     Cout << std::endl;
 }
 
@@ -544,305 +561,439 @@ bool SaveAsDDS(const std::vector<BytesArray>& compressedMips, const size_t w, co
     }
 }
 
-int Main(int argc, Char** argv) {
+int PackBump(int argc, Char** argv) {
     std::error_code errorCode;
     fs::file_status fileStatus;
 
-    if (argc <= 1 || (argc > 1 && String(_T("-help")) == argv[1])) {
-        PrintUsage();
-    } else {
-        String paramN, paramG, paramH, paramO, paramL, paramQ;
+    String paramN, paramG, paramH, paramO, paramL, paramQ;
 
-        std::vector<std::pair<Char, String*>> paramsMap = {
-            { _T('n'), &paramN },
-            { _T('g'), &paramG },
-            { _T('h'), &paramH },
-            { _T('o'), &paramO },
-            { _T('l'), &paramL },
-            { _T('q'), &paramQ }
-        };
+    std::vector<std::pair<Char, String*>> paramsMap = {
+        { _T('n'), &paramN },
+        { _T('g'), &paramG },
+        { _T('h'), &paramH },
+        { _T('o'), &paramO },
+        { _T('l'), &paramL },
+        { _T('q'), &paramQ }
+    };
 
-        Char** it = argv, **end = argv + argc;
-        for (; it != end; ++it) {
-            String s = *it;
+    Char** it = argv, **end = argv + argc;
+    for (; it != end; ++it) {
+        String s = *it;
 
-            bool knownParam = false;
-            if (s.length() > 3 && s[2] == ':') {
-                if (s[0] == _T('-')) {
-                    const Char c = s[1];
-                    auto paramsIt = std::find_if(paramsMap.begin(), paramsMap.end(), [c](auto& v)->bool {
-                        return c == v.first;
-                    });
+        bool knownParam = false;
+        if (s.length() > 3 && s[2] == ':') {
+            if (s[0] == _T('-')) {
+                const Char c = s[1];
+                auto paramsIt = std::find_if(paramsMap.begin(), paramsMap.end(), [c](auto& v)->bool {
+                    return c == v.first;
+                });
 
-                    if (paramsIt != paramsMap.end()) {
-                        knownParam = true;
-                        *paramsIt->second = s.substr(3);
-                        paramsMap.erase(paramsIt);
-                    } else {
-                        const size_t paramIdx = std::distance(it, end);
-                        Cerr << _T("Unknown param #") << paramIdx << _T(" \"") << s << _T("\"") << std::endl;
-                    }
+                if (paramsIt != paramsMap.end()) {
+                    knownParam = true;
+                    *paramsIt->second = s.substr(3);
+                    paramsMap.erase(paramsIt);
+                } else {
+                    const size_t paramIdx = std::distance(it, end);
+                    Cerr << _T("Unknown param #") << paramIdx << _T(" \"") << s << _T("\"") << std::endl;
                 }
             }
         }
+    }
 
-        const bool linearGloss = !paramL.empty() && paramL.front() == _T('g');
-        const int quality = !paramQ.empty() ? std::stoi(paramQ) : 2;
+    const bool linearGloss = !paramL.empty() && paramL.front() == _T('g');
+    const int quality = !paramQ.empty() ? std::stoi(paramQ) : 2;
 
-        Cout << _T("Using quality level ") << quality << std::endl;
+    Cout << _T("Using quality level ") << quality << std::endl;
 
-        fs::path pathNormalmap, pathGlossmap, pathHeightmap, pathOutput;
+    fs::path pathNormalmap, pathGlossmap, pathHeightmap, pathOutput;
 
-        if (paramN.empty()) {
-            Cerr << _T("No normalmap provided, nothing to do for me...") << std::endl;
-            PrintUsage();
-            return -1;
+    if (paramN.empty()) {
+        Cerr << _T("No normalmap provided, nothing to do for me...") << std::endl;
+        PrintUsage();
+        return -1;
+    }
+
+    pathNormalmap = paramN;
+    fileStatus = fs::status(pathNormalmap, errorCode);
+    if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
+        Cerr << _T("Provided normalmap path does not exist or not a valid file!") << std::endl;
+        return -1;
+    }
+
+    if (paramO.empty()) {
+        Cout << _T("No output option provided, using source name and folder") << std::endl;
+        pathOutput = pathNormalmap.parent_path() / pathNormalmap.stem();
+    } else {
+        pathOutput = paramO;
+        fileStatus = fs::status(pathOutput, errorCode);
+        if (fs::exists(fileStatus) && fs::is_directory(fileStatus)) {
+            Cout << _T("A directory was provided as an output, source name will be used") << std::endl;
+            pathOutput /= pathNormalmap.stem();
         }
+    }
 
-        pathNormalmap = paramN;
-        fileStatus = fs::status(pathNormalmap, errorCode);
+    if (!paramG.empty()) {
+        pathGlossmap = paramG;
+        fileStatus = fs::status(pathGlossmap, errorCode);
         if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
-            Cerr << _T("Provided normalmap path does not exist or not a valid file!") << std::endl;
-            return -1;
-        }
-
-        if (paramO.empty()) {
-            Cout << _T("No output option provided, using source name and folder") << std::endl;
-            pathOutput = pathNormalmap.parent_path() / pathNormalmap.stem();
-        } else {
-            pathOutput = paramO;
-            fileStatus = fs::status(pathOutput, errorCode);
-            if (fs::exists(fileStatus) && fs::is_directory(fileStatus)) {
-                Cout << _T("A directory was provided as an output, source name will be used") << std::endl;
-                pathOutput /= pathNormalmap.stem();
-            }
-        }
-
-        if (!paramG.empty()) {
-            pathGlossmap = paramG;
-            fileStatus = fs::status(pathGlossmap, errorCode);
-            if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
-                Cout << _T("Provided glossmap path does not exist or not a valid file.") << std::endl;
-                Cout << _T("This is not a showstopper, just gloss will be omitted from the result.") << std::endl;
-                pathGlossmap.clear();
-            }
-        }
-
-        if (!paramH.empty()) {
-            pathHeightmap = paramH;
-            fileStatus = fs::status(pathHeightmap, errorCode);
-            if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
-                Cout << _T("Provided heightmap path does not exist or not a valid file.") << std::endl;
-                Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
-                pathHeightmap.clear();
-            }
-        }
-
-        Bitmap<PixelRgba> normalmap = LoadBitmap<PixelRgba>(pathNormalmap);
-        if (normalmap.empty()) {
-            Cerr << _T("Couldn't load normalmap, not an image or unsupported format?") << std::endl;
-            return -1;
-        } else if (!IsPowerOfTwo(normalmap.width) || !IsPowerOfTwo(normalmap.height)) {
-            Cerr << _T("Normalmap width & height must be power of two!") << std::endl;
-            return -1;
-        }
-
-        Bitmap<PixelMono> glossmap = pathGlossmap.empty() ? Bitmap<PixelMono>(0, 1) : LoadBitmap<PixelMono>(pathGlossmap);
-        Bitmap<PixelMono> heightmap = pathHeightmap.empty() ? Bitmap<PixelMono>(0, 1) : LoadBitmap<PixelMono>(pathHeightmap);
-
-        if (glossmap.empty() && !glossmap.height) {
-            Cout << _T("Couldn't load glossmap, not an image or unsupported format?") << std::endl;
+            Cout << _T("Provided glossmap path does not exist or not a valid file.") << std::endl;
             Cout << _T("This is not a showstopper, just gloss will be omitted from the result.") << std::endl;
-        } else if (glossmap.width != normalmap.width || glossmap.height != normalmap.height) {
-            Cout << _T("Glossmap has different dimensions than normalmap!") << std::endl;
-            Cout << _T("This is not a showstopper, just gloss will be omitted from the result.") << std::endl;
-            glossmap.clear();
+            pathGlossmap.clear();
         }
+    }
 
-        if (heightmap.empty() && !heightmap.height) {
-            Cout << _T("Couldn't load heightmap, not an image or unsupported format?") << std::endl;
+    if (!paramH.empty()) {
+        pathHeightmap = paramH;
+        fileStatus = fs::status(pathHeightmap, errorCode);
+        if (!fs::exists(fileStatus) || !fs::is_regular_file(fileStatus)) {
+            Cout << _T("Provided heightmap path does not exist or not a valid file.") << std::endl;
             Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
-        } else if (heightmap.width != normalmap.width || heightmap.height != normalmap.height) {
-            Cout << _T("Heightmap has different dimensions than normalmap!") << std::endl;
-            Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
-            heightmap.clear();
+            pathHeightmap.clear();
+        }
+    }
+
+    Bitmap<PixelRgba> normalmap = LoadBitmap<PixelRgba>(pathNormalmap);
+    if (normalmap.empty()) {
+        Cerr << _T("Couldn't load normalmap, not an image or unsupported format?") << std::endl;
+        return -1;
+    } else if (!IsPowerOfTwo(normalmap.width) || !IsPowerOfTwo(normalmap.height)) {
+        Cerr << _T("Normalmap width & height must be power of two!") << std::endl;
+        return -1;
+    }
+
+    Bitmap<PixelMono> glossmap = pathGlossmap.empty() ? Bitmap<PixelMono>(0, 1) : LoadBitmap<PixelMono>(pathGlossmap);
+    Bitmap<PixelMono> heightmap = pathHeightmap.empty() ? Bitmap<PixelMono>(0, 1) : LoadBitmap<PixelMono>(pathHeightmap);
+
+    if (glossmap.empty() && !glossmap.height) {
+        Cout << _T("Couldn't load glossmap, not an image or unsupported format?") << std::endl;
+        Cout << _T("This is not a showstopper, just gloss will be omitted from the result.") << std::endl;
+    } else if (glossmap.width != normalmap.width || glossmap.height != normalmap.height) {
+        Cout << _T("Glossmap has different dimensions than normalmap!") << std::endl;
+        Cout << _T("This is not a showstopper, just gloss will be omitted from the result.") << std::endl;
+        glossmap.clear();
+    }
+
+    if (heightmap.empty() && !heightmap.height) {
+        Cout << _T("Couldn't load heightmap, not an image or unsupported format?") << std::endl;
+        Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
+    } else if (heightmap.width != normalmap.width || heightmap.height != normalmap.height) {
+        Cout << _T("Heightmap has different dimensions than normalmap!") << std::endl;
+        Cout << _T("This is not a showstopper, default (neutral) height will be used.") << std::endl;
+        heightmap.clear();
+    }
+
+    // make default heightmap
+    if (heightmap.empty()) {
+        heightmap = Bitmap<PixelMono>(normalmap.width, normalmap.height, { 128 });
+    }
+
+    //rgbcx::init(rgbcx::bc1_approx_mode::cBC1IdealRound4);
+    rgbcx::init(rgbcx::bc1_approx_mode::cBC1NVidia);
+
+    const size_t nwidth = normalmap.width;
+    const size_t nheight = normalmap.height;
+
+    // step 1: make mipchains with our source images
+    Cout << _T("Computing mipmaps for the source normalmap...") << std::endl;
+    Texture<PixelRgba> normalmapWithMips(nwidth, nheight);
+    normalmapWithMips.mips[0] = normalmap; normalmap.clear();
+    BuildMipchain<PixelRgba, true>(normalmapWithMips);
+    Cout << _T("Successfully created ") << normalmapWithMips.mips.size() << _T(" mips") << std::endl;
+
+    Texture<PixelMono> glossmapWithMips(nwidth, nheight);
+    if (!glossmap.empty()) {
+        Cout << _T("Computing mipmaps for the source glossmap...") << std::endl;
+        glossmapWithMips.mips[0] = glossmap; glossmap.clear();
+        BuildMipchain<PixelMono, false>(glossmapWithMips);
+        Cout << _T("Successfully created ") << glossmapWithMips.mips.size() << _T(" mips") << std::endl;
+    }
+
+    Texture<PixelMono> heightmapWithMips(nwidth, nheight);
+    if (!heightmap.empty()) {
+        Cout << _T("Computing mipmaps for the source heightmap...") << std::endl;
+        heightmapWithMips.mips[0] = heightmap; heightmap.clear();
+        BuildMipchain<PixelMono, false>(heightmapWithMips);
+        Cout << _T("Successfully created ") << heightmapWithMips.mips.size() << _T(" mips") << std::endl;
+    }
+
+    // step 2: assemble stalker normalmap
+    Cout << _T("Assembling stalker bump (a - NX, b - NY, g - NZ, r - Gloss)...") << std::endl;
+    for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
+        auto& normalMip = normalmapWithMips.mips[i];
+        auto& glossMip = glossmapWithMips.mips[i];
+        std::transform(normalMip.pixels.begin(),
+            normalMip.pixels.end(),
+            glossMip.pixels.begin(),
+            normalMip.pixels.begin(),
+            [linearGloss](const auto& np, const auto& gp)->PixelRgba {
+            return {
+                // stalker stores gloss logarithmically to gain some precision for lower values (linearized back in shader)
+                linearGloss ? gp.r : scast<uint8_t>(std::sqrt(scast<float>(gp.r) / 255.0f) * 255.0f),
+                // swizzle is weird, as NZ typically doesn't require much precision (you can even omit one)
+                // but meh, we must follow the original
+                np.b,
+                np.g,
+                np.r
+            };
+        });
+    }
+    Cout << _T("Done") << std::endl;
+
+    // step 3: compress the normalmap
+    std::vector<BytesArray> normalmapWithMipsCompressed(normalmapWithMips.mips.size());
+    for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
+        auto& normalMip = normalmapWithMips.mips[i];
+        auto& compressedMip = normalmapWithMipsCompressed[i];
+
+        Cout << _T("Compressing bump mip ") << i << _T("...") << std::endl;
+
+        const size_t compressedMipSize = ((normalMip.width / 4) * (normalMip.height / 4)) * 16;
+        compressedMip.resize(compressedMipSize);
+
+        switch (quality) {
+            case 0:
+                CompressBC3_STB(normalMip, compressedMip.data());
+                break;
+            case 1:
+                CompressBC3_Squish(normalMip, compressedMip.data());
+                break;
+            case 2:
+            default:
+                CompressBC3_RGBCX(normalMip, compressedMip.data());
+                break;
         }
 
-        // make default heightmap
-        if (heightmap.empty()) {
-            heightmap = Bitmap<PixelMono>(normalmap.width, normalmap.height, { 128 });
-        }
+        const size_t originalMipSize = normalMip.width * normalMip.height * BytesPerPixel<PixelRgba>();
+        Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
+    }
 
-        //rgbcx::init(rgbcx::bc1_approx_mode::cBC1IdealRound4);
-        rgbcx::init(rgbcx::bc1_approx_mode::cBC1NVidia);
+    // step 4: decompress the normalmap and calculate the error, assemble bump# with the error and the height
+    //         the format is: RGB - error * 2, A - height
+    Texture<PixelRgba> bumpXWithMips(nwidth, nheight);
+    for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
+        auto& normalMip = normalmapWithMips.mips[i];
+        auto& compressedMip = normalmapWithMipsCompressed[i];
+        auto& heightMip = heightmapWithMips.mips[i];
+        auto& bumpXMip = bumpXWithMips.mips[i];
 
-        const size_t nwidth = normalmap.width;
-        const size_t nheight = normalmap.height;
+        Cout << _T("Calculating error for mip ") << i << _T("...") << std::endl;
+        DecompressBC3_MY(compressedMip.data(), bumpXMip);
 
-        // step 1: make mipchains with our source images
-        Cout << _T("Computing mipmaps for the source normalmap...") << std::endl;
-        Texture<PixelRgba> normalmapWithMips(nwidth, nheight);
-        normalmapWithMips.mips[0] = normalmap; normalmap.clear();
-        BuildMipchain<PixelRgba, true>(normalmapWithMips);
-        Cout << _T("Successfully created ") << normalmapWithMips.mips.size() << _T(" mips") << std::endl;
+        // calculate the difference and un-swizzle back to RGB
+        std::transform(normalMip.pixels.begin(),
+            normalMip.pixels.end(),
+            bumpXMip.pixels.begin(),
+            bumpXMip.pixels.begin(),
+            [](const auto& np, const auto& dp)->PixelRgba {
+            return {
+                scast<uint8_t>(Clamp((scast<int>(np.a) - scast<int>(dp.a)) * 2 + 128, 0, 255)),
+                scast<uint8_t>(Clamp((scast<int>(np.b) - scast<int>(dp.b)) * 2 + 128, 0, 255)),
+                scast<uint8_t>(Clamp((scast<int>(np.g) - scast<int>(dp.g)) * 2 + 128, 0, 255)),
+                0
+            };
+        });
 
-        Texture<PixelMono> glossmapWithMips(nwidth, nheight);
-        if (!glossmap.empty()) {
-            Cout << _T("Computing mipmaps for the source glossmap...") << std::endl;
-            glossmapWithMips.mips[0] = glossmap; glossmap.clear();
-            BuildMipchain<PixelMono, false>(glossmapWithMips);
-            Cout << _T("Successfully created ") << glossmapWithMips.mips.size() << _T(" mips") << std::endl;
-        }
+        // move height to alpha
+        std::transform(bumpXMip.pixels.begin(),
+            bumpXMip.pixels.end(),
+            heightMip.pixels.begin(),
+            bumpXMip.pixels.begin(),
+            [](const auto& xp, const auto& hp)->PixelRgba {
+            return { xp.r, xp.g, xp.b, hp.r };
+        });
 
-        Texture<PixelMono> heightmapWithMips(nwidth, nheight);
-        if (!heightmap.empty()) {
-            Cout << _T("Computing mipmaps for the source heightmap...") << std::endl;
-            heightmapWithMips.mips[0] = heightmap; heightmap.clear();
-            BuildMipchain<PixelMono, false>(heightmapWithMips);
-            Cout << _T("Successfully created ") << heightmapWithMips.mips.size() << _T(" mips") << std::endl;
-        }
-
-        // step 2: assemble stalker normalmap
-        Cout << _T("Assembling stalker bump (a - NX, b - NY, g - NZ, r - Gloss)...") << std::endl;
-        for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
-            auto& normalMip = normalmapWithMips.mips[i];
-            auto& glossMip = glossmapWithMips.mips[i];
-            std::transform(normalMip.pixels.begin(),
-                           normalMip.pixels.end(),
-                           glossMip.pixels.begin(),
-                           normalMip.pixels.begin(),
-                           [linearGloss](const auto& np, const auto& gp)->PixelRgba {
-                return {
-                    // stalker stores gloss logarithmically to gain some precision for lower values (linearized back in shader)
-                    linearGloss ? gp.r : scast<uint8_t>(std::sqrt(scast<float>(gp.r) / 255.0f) * 255.0f),
-                    // swizzle is weird, as NZ typically doesn't require much precision (you can even omit one)
-                    // but meh, we must follow the original
-                    np.b,
-                    np.g,
-                    np.r
-                };
-            });
-        }
         Cout << _T("Done") << std::endl;
+    }
 
-        // step 3: compress the normalmap
-        std::vector<BytesArray> normalmapWithMipsCompressed(normalmapWithMips.mips.size());
-        for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
-            auto& normalMip = normalmapWithMips.mips[i];
-            auto& compressedMip = normalmapWithMipsCompressed[i];
+    // step 5: compress bump#
+    std::vector<BytesArray> bumpXMipsCompressed(bumpXWithMips.mips.size());
+    for (size_t i = 0, end = bumpXWithMips.mips.size(); i != end; ++i) {
+        auto& bumpXMip = bumpXWithMips.mips[i];
+        auto& compressedMip = bumpXMipsCompressed[i];
 
-            Cout << _T("Compressing bump mip ") << i << _T("...") << std::endl;
+        Cout << _T("Compressing bump# mip ") << i << _T("...") << std::endl;
 
-            const size_t compressedMipSize = ((normalMip.width / 4) * (normalMip.height / 4)) * 16;
-            compressedMip.resize(compressedMipSize);
+        const size_t compressedMipSize = ((bumpXMip.width / 4) * (bumpXMip.height / 4)) * 16;
+        compressedMip.resize(compressedMipSize);
 
-            switch (quality) {
-                case 0:
-                    CompressBC3_STB(normalMip, compressedMip.data());
-                    break;
-                case 1:
-                    CompressBC3_Squish(normalMip, compressedMip.data());
-                    break;
-                case 2:
-                default:
-                    CompressBC3_RGBCX(normalMip, compressedMip.data());
-                    break;
+        switch (quality) {
+            case 0:
+                CompressBC3_STB(bumpXMip, compressedMip.data());
+                break;
+            case 1:
+                CompressBC3_Squish(bumpXMip, compressedMip.data());
+                break;
+            case 2:
+            default:
+                CompressBC3_RGBCX(bumpXMip, compressedMip.data());
+                break;
+        }
+
+        const size_t originalMipSize = bumpXMip.width * bumpXMip.height * BytesPerPixel<PixelRgba>();
+        Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
+    }
+
+    // step 6: save everything
+    fs::path bumpOutputPath = pathOutput; bumpOutputPath += _T("_bump.dds");
+    fs::path bumpXOutputPath = pathOutput; bumpXOutputPath += _T("_bump#.dds");
+
+    if (!SaveAsDDS(normalmapWithMipsCompressed, nwidth, nheight, bumpOutputPath)) {
+        Cerr << _T("Failed to write bump texture to ") << bumpOutputPath << std::endl;
+        return -1;
+    } else {
+        Cout << _T("Successfully saved ") << bumpOutputPath << std::endl;
+    }
+
+    if (!SaveAsDDS(bumpXMipsCompressed, nwidth, nheight, bumpXOutputPath)) {
+        Cerr << _T("Failed to write bump# texture to ") << bumpXOutputPath << std::endl;
+        return -1;
+    } else {
+        Cout << _T("Successfully saved ") << bumpXOutputPath << std::endl;
+    }
+
+    return 0;
+}
+
+int UnpackBump(int argc, Char** argv) {
+    auto loadAndDecompressDDS = [](const fs::path& ddsPath)->Bitmap<PixelRgba> {
+        std::ifstream file(ddsPath, std::ifstream::in | std::ifstream::binary);
+        if (file.is_open()) {
+            uint32_t signature = 0;
+            file.read(rcast<char*>(&signature), sizeof(signature));
+            if (kDDSFileSignature == signature) {
+                DDSURFACEDESC2 desc = {};
+                file.read(rcast<char*>(&desc), sizeof(desc));
+                if (desc.ddpfPixelFormat.dwFlags == 0x00000004 &&   // DDPF_FOURCC
+                    desc.ddpfPixelFormat.dwFourCC == 0x35545844) {  // DXT5
+                    const size_t compressedSize = ((desc.dwWidth / 4) * (desc.dwHeight / 4)) * 16;
+                    std::vector<uint8_t> compressedImage(compressedSize);
+                    file.read(rcast<char*>(compressedImage.data()), compressedImage.size());
+                    file.close();
+
+                    Bitmap<PixelRgba> bmp(desc.dwWidth, desc.dwHeight);
+                    DecompressBC3_MY(compressedImage.data(), bmp);
+                    return bmp;
+                } else {
+                    return Bitmap<PixelRgba>(0, 0);
+                }
+            } else {
+                return Bitmap<PixelRgba>(0, 0);
             }
-
-            const size_t originalMipSize = normalMip.width * normalMip.height * BytesPerPixel<PixelRgba>();
-            Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
-        }
-
-        // step 4: decompress the normalmap and calculate the error, assemble bump# with the error and the height
-        //         the format is: RGB - error * 2, A - height
-        Texture<PixelRgba> bumpXWithMips(nwidth, nheight);
-        for (size_t i = 0, end = normalmapWithMips.mips.size(); i != end; ++i) {
-            auto& normalMip = normalmapWithMips.mips[i];
-            auto& compressedMip = normalmapWithMipsCompressed[i];
-            auto& heightMip = heightmapWithMips.mips[i];
-            auto& bumpXMip = bumpXWithMips.mips[i];
-
-            Cout << _T("Calculating error for mip ") << i << _T("...") << std::endl;
-            DecompressBC3_MY(compressedMip.data(), bumpXMip);
-
-            // calculate the difference and un-swizzle back to RGB
-            std::transform(normalMip.pixels.begin(),
-                           normalMip.pixels.end(),
-                           bumpXMip.pixels.begin(),
-                           bumpXMip.pixels.begin(),
-                           [](const auto& np, const auto& dp)->PixelRgba {
-                return {
-                    scast<uint8_t>(Clamp((scast<int>(np.a) - scast<int>(dp.a)) * 2 + 128, 0, 255)),
-                    scast<uint8_t>(Clamp((scast<int>(np.b) - scast<int>(dp.b)) * 2 + 128, 0, 255)),
-                    scast<uint8_t>(Clamp((scast<int>(np.g) - scast<int>(dp.g)) * 2 + 128, 0, 255)),
-                    0
-                };
-            });
-
-            // move height to alpha
-            std::transform(bumpXMip.pixels.begin(),
-                           bumpXMip.pixels.end(),
-                           heightMip.pixels.begin(),
-                           bumpXMip.pixels.begin(),
-                           [](const auto& xp, const auto& hp)->PixelRgba {
-                return { xp.r, xp.g, xp.b, hp.r };
-            });
-
-            Cout << _T("Done") << std::endl;
-        }
-
-        // step 5: compress bump#
-        std::vector<BytesArray> bumpXMipsCompressed(bumpXWithMips.mips.size());
-        for (size_t i = 0, end = bumpXWithMips.mips.size(); i != end; ++i) {
-            auto& bumpXMip = bumpXWithMips.mips[i];
-            auto& compressedMip = bumpXMipsCompressed[i];
-
-            Cout << _T("Compressing bump# mip ") << i << _T("...") << std::endl;
-
-            const size_t compressedMipSize = ((bumpXMip.width / 4) * (bumpXMip.height / 4)) * 16;
-            compressedMip.resize(compressedMipSize);
-
-            switch (quality) {
-                case 0:
-                    CompressBC3_STB(bumpXMip, compressedMip.data());
-                    break;
-                case 1:
-                    CompressBC3_Squish(bumpXMip, compressedMip.data());
-                    break;
-                case 2:
-                default:
-                    CompressBC3_RGBCX(bumpXMip, compressedMip.data());
-                    break;
-            }
-
-            const size_t originalMipSize = bumpXMip.width * bumpXMip.height * BytesPerPixel<PixelRgba>();
-            Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
-        }
-
-        // step 6: save everything
-        fs::path bumpOutputPath = pathOutput; bumpOutputPath += _T("_bump.dds");
-        fs::path bumpXOutputPath = pathOutput; bumpXOutputPath += _T("_bump#.dds");
-
-        if (!SaveAsDDS(normalmapWithMipsCompressed, nwidth, nheight, bumpOutputPath)) {
-            Cerr << _T("Failed to write bump texture to ") << bumpOutputPath << std::endl;
-            return -1;
         } else {
-            Cout << _T("Successfully saved ") << bumpOutputPath << std::endl;
+            return Bitmap<PixelRgba>(0, 0);
         }
+    };
 
-        if (!SaveAsDDS(bumpXMipsCompressed, nwidth, nheight, bumpXOutputPath)) {
-            Cerr << _T("Failed to write bump# texture to ") << bumpXOutputPath << std::endl;
-            return -1;
-        } else {
-            Cout << _T("Successfully saved ") << bumpXOutputPath << std::endl;
-        }
+    fs::path bumpPath = argv[1];
+
+    Bitmap<PixelRgba> bump = loadAndDecompressDDS(bumpPath);
+    if (bump.empty()) {
+        Cout << _T("Failed to load ") << argv[1] << std::endl;
+        return -1;
+    }
+
+    fs::path bumpXPath = (bumpPath.parent_path() / bumpPath.stem()).native() + _T("#.dds");
+    Bitmap<PixelRgba> bumpX = loadAndDecompressDDS(bumpXPath);
+    if (bumpX.empty()) {
+        Cout << _T("Failed to load ") << bumpXPath << std::endl;
+        return -1;
+    }
+
+    if (bump.width != bumpX.width || bump.height != bumpX.height) {
+        Cout << _T("The two dds files are not of the same size! Aborting...") << std::endl;
+        return -1;
+    }
+
+    fs::path bumpName = bumpPath.stem();
+
+    fs::path outputFolder = (argc == 3) ? argv[2] : bumpPath.parent_path();
+
+    Cout << _T("Saving out heightmap:") << std::endl;
+    fs::path heightmapPath = outputFolder / (bumpName.native() + _T("_height.tga"));
+    Cout << heightmapPath << std::endl;
+    std::vector<uint8_t> heightmapData(bumpX.width * bumpX.height);
+    for (size_t i = 0; i < bumpX.width * bumpX.height; ++i) {
+        heightmapData[i] = bumpX.pixels[i].a;
+    }
+    int stbResult = stbi_write_tga(heightmapPath.u8string().c_str(), scast<int>(bumpX.width), scast<int>(bumpX.height), 1, heightmapData.data());
+    if (!stbResult) {
+        Cout << _T("Failed :(") << std::endl;
+    }
+    heightmapData.clear();
+
+    Cout << _T("Saving out glossmap:") << std::endl;
+    fs::path glossmapPath = outputFolder / (bumpName.native() + _T("_gloss.tga"));
+    Cout << glossmapPath << std::endl;
+    std::vector<uint8_t> glossmapData(bump.width * bump.height);
+    for (size_t i = 0; i < bump.width * bump.height; ++i) {
+        glossmapData[i] = bump.pixels[i].r;
+    }
+    stbResult = stbi_write_tga(glossmapPath.u8string().c_str(), scast<int>(bump.width), scast<int>(bump.height), 1, glossmapData.data());
+    if (!stbResult) {
+        Cout << _T("Failed :(") << std::endl;
+    }
+    glossmapData.clear();
+
+    Cout << _T("Saving out normalmap:") << std::endl;
+    fs::path normalmapPath = outputFolder / (bumpName.native() + _T("_normal.tga"));
+    Cout << normalmapPath << std::endl;
+    std::vector<PixelRgb> normalmapData(bump.width * bump.height);
+    for (size_t i = 0; i < bump.width * bump.height; ++i) {
+        const float nX = scast<float>(bump.pixels[i].a) / 255.0f;
+        const float nY = scast<float>(bump.pixels[i].b) / 255.0f;
+        const float nZ = scast<float>(bump.pixels[i].g) / 255.0f;
+
+        const float eX = scast<float>(bumpX.pixels[i].r) / 255.0f;
+        const float eY = scast<float>(bumpX.pixels[i].g) / 255.0f;
+        const float eZ = scast<float>(bumpX.pixels[i].b) / 255.0f;
+
+        float NX = nX + (eX - 1.0f);
+        float NY = nY + (eY - 1.0f);
+        float NZ = nZ + (eZ - 1.0f);
+
+        const float il = 1.0f / std::sqrt(NX * NX + NY * NY + NZ * NZ);
+        NX *= il;
+        NY *= il;
+        NZ *= il;
+        PixelRgb& result = normalmapData[i];
+        result.r = scast<uint8_t>(Clamp((NX * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+        result.g = scast<uint8_t>(Clamp((NY * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+        result.b = scast<uint8_t>(Clamp((NZ * 0.5f + 0.5f) * 255.0f, 0.0f, 255.0f));
+    }
+    stbResult = stbi_write_tga(normalmapPath.u8string().c_str(), scast<int>(bump.width), scast<int>(bump.height), 3, normalmapData.data());
+    if (!stbResult) {
+        Cout << _T("Failed :(") << std::endl;
     }
 
     return 0;
 }
 
 
+int Main(int argc, Char** argv) {
+    int returnCode = 0;
+
+    if (argc <= 1 || (argc > 1 && String(_T("-help")) == argv[1])) {
+        PrintUsage();
+    } else {
+        // detect the mode
+        bool isPackingMode = true;
+        if (argc == 2 || argc == 3) {
+            if (StrEndsWith(argv[1], _T(".dds"))) {
+                isPackingMode = false;
+            }
+        }
+
+        Cout << _T("Selected mode - ") << (isPackingMode ? _T("1, packing.") : _T("2, unpacking.")) << std::endl;
+
+        returnCode = isPackingMode ? PackBump(argc, argv) : UnpackBump(argc, argv);
+    }
+
+    return returnCode;
+}
+
+
 // Changelog:
+// v0.6 - added mode to decompose bump and bump# files back to normalmap gloss and heightmap
 // v0.5 - added Kaiser resample filter to stbi_image_resize library and using it by default now
 // v0.4 - added RGBCX BC compression for even better quality
 // v0.3 - added Squish BC compression for better quality
