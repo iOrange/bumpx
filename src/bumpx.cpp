@@ -1,6 +1,6 @@
 // iOrange, 2020
 // takes normalmap + optional gloss and height maps and outputs bump and bump# textures for Stalker and Metro 2033 build 375 games
-// Current version v0.5
+// Current version v0.7
 
 #include <iostream>
 #include <string>
@@ -31,6 +31,7 @@ using BytesArray = std::vector<uint8_t>;
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #define STBIR_DEFAULT_FILTER_DOWNSAMPLE  STBIR_FILTER_KAISER
+#define STBIR_ASSERT(boolval)
 #include "stb_image_resize.h"
 
 #define STB_DXT_IMPLEMENTATION
@@ -53,7 +54,9 @@ using BytesArray = std::vector<uint8_t>;
 #define RGBCX_IMPLEMENTATION
 #include "rgbcx.h"
 
-
+// My own BCDEC library to decompress BC blocks :)
+#define BCDEC_IMPLEMENTATION
+#include "../bcdec/bcdec.h"
 
 #ifdef _WIN32
 using Char = wchar_t;
@@ -62,6 +65,7 @@ using String = std::wstring;
 #define Cout std::wcout
 #define Cerr std::wcerr
 #define Main wmain
+#define ENABLE_NVTT3 1
 #else
 using Char = char;
 using String = std::string;
@@ -70,6 +74,18 @@ using String = std::string;
 #define Cerr std::cerr
 #define Main main
 #endif //  _WIN32
+
+#ifdef ENABLE_NVTT3
+#include "../nvtt3/nvtt.h"
+#include "../nvtt3/nvtt_lowlevel.h"
+#include "../nvtt3/nvtt_wrapper.h"
+NvttCPUInputBuffer*(*func_nvttCreateCPUInputBuffer)(const NvttRefImage*, NvttValueType, int, int, int, float, float, float, float, NvttTimingContext*, unsigned*);
+void(*func_nvttDestroyCPUInputBuffer)(NvttCPUInputBuffer*);
+void(*func_nvttEncodeBC3CPU)(const NvttCPUInputBuffer*, NvttBoolean, void*, NvttBoolean, NvttBoolean, NvttTimingContext*);
+
+extern "C" __declspec(dllimport) void* __stdcall LoadLibraryW(const wchar_t* lpLibFileName);
+extern "C" __declspec(dllimport) void* __stdcall GetProcAddress(void* hModule, const char* lpProcName);
+#endif // ENABLE_NVTT3
 
 #ifdef __GNUC__
 #define PACKED_STRUCT_BEGIN
@@ -84,6 +100,21 @@ using String = std::string;
 #define rcast reinterpret_cast
 
 static const size_t kMinMipSize = 4;    // 4 because the result is always BC compressed
+
+#ifdef ENABLE_NVTT3
+constexpr size_t kNumCompressors = 4;
+#else
+constexpr size_t kNumCompressors = 3;
+#endif
+
+static const String kCompressorsNames[kNumCompressors] = {
+    _T("STB (nothings.org)"),
+    _T("Squish"),
+    _T("RGBCX (ryg)"),
+#ifdef ENABLE_NVTT3
+    _T("Nvidia Texture Tools 3")
+#endif
+};
 
 static size_t Log2I(size_t v) {
     size_t result = 0;
@@ -389,80 +420,47 @@ void CompressBC3_RGBCX(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
     }
 }
 
-template <bool isBC3>
-void DecodeBCColorBlock(uint8_t* dest, const size_t w, const size_t h, const size_t xOff, const size_t yOff, const uint8_t* src) {
-    uint8_t colors[4][3];
+#ifdef ENABLE_NVTT3
+void CompressBC3_NVTT3(const Bitmap<PixelRgba>& bmp, void* outBlocks) {
+    NvttRefImage nvttImage = {};
+    nvttImage.data = bmp.pixels.data();
+    nvttImage.width = static_cast<int>(bmp.width);
+    nvttImage.height = static_cast<int>(bmp.height);
+    nvttImage.depth = 1;
+    nvttImage.num_channels = 4;
+    nvttImage.channel_swizzle[0] = NVTT_ChannelOrder_Red;
+    nvttImage.channel_swizzle[1] = NVTT_ChannelOrder_Green;
+    nvttImage.channel_swizzle[2] = NVTT_ChannelOrder_Blue;
+    nvttImage.channel_swizzle[3] = NVTT_ChannelOrder_Alpha;
+    nvttImage.channel_interleave = NVTT_True;
 
-    const uint16_t c0 = rcast<const uint16_t*>(src)[0];
-    const uint16_t c1 = rcast<const uint16_t*>(src)[1];
+    NvttCPUInputBuffer* input = func_nvttCreateCPUInputBuffer(&nvttImage, NVTT_ValueType_UINT8, 1, 4, 4, 1, 1, 1, 1, nullptr, nullptr);
+    func_nvttEncodeBC3CPU(input, NVTT_False, outBlocks, NVTT_False, NVTT_False, nullptr);
+    func_nvttDestroyCPUInputBuffer(input);
+}
+#endif // ENABLE_NVTT3
 
-    // Extract the two stored colors
-    colors[0][0] = ((c0 >> 11) & 0x1F) << 3;
-    colors[0][1] = ((c0 >> 5) & 0x3F) << 2;
-    colors[0][2] = (c0 & 0x1F) << 3;
 
-    colors[1][0] = ((c1 >> 11) & 0x1F) << 3;
-    colors[1][1] = ((c1 >> 5) & 0x3F) << 2;
-    colors[1][2] = (c1 & 0x1F) << 3;
-
-    // compute the other two colors
-    if (c0 > c1 || isBC3) {
-        for (size_t i = 0; i < 3; ++i) {
-            colors[2][i] = (2 * colors[0][i] + colors[1][i] + 1) / 3;
-            colors[3][i] = (colors[0][i] + 2 * colors[1][i] + 1) / 3;
-        }
-    } else {
-        for (size_t i = 0; i < 3; ++i) {
-            colors[2][i] = (colors[0][i] + colors[1][i] + 1) >> 1;
-            colors[3][i] = 0;
-        }
-    }
-
-    src += 4;
-    for (size_t y = 0; y < h; ++y) {
-        uint8_t* dst = dest + yOff * y;
-        uint32_t indexes = src[y];
-        for (size_t x = 0; x < w; ++x) {
-            const uint32_t index = indexes & 0x3;
-            dst[0] = colors[index][0];
-            dst[1] = colors[index][1];
-            dst[2] = colors[index][2];
-            indexes >>= 2;
-
-            dst += xOff;
-        }
+void CompressBC3(const int quality, const Bitmap<PixelRgba>& bmp, void* outBlocks) {
+    switch (quality) {
+        case 0:
+            CompressBC3_STB(bmp, outBlocks);
+        break;
+        case 1:
+            CompressBC3_Squish(bmp, outBlocks);
+        break;
+#ifdef ENABLE_NVTT3
+        case 3:
+            CompressBC3_NVTT3(bmp, outBlocks);
+        break;
+#endif
+        case 2:
+        default:
+            CompressBC3_RGBCX(bmp, outBlocks);
+        break;
     }
 }
 
-void DecodeBC3AlphaBlock(uint8_t* dest, const size_t w, const size_t h, const size_t xOff, const size_t yOff, const uint8_t* src) {
-    const uint8_t a0 = src[0];
-    const uint8_t a1 = src[1];
-    uint64_t alpha = *rcast<const uint64_t*>(src) >> 16;
-
-    for (size_t y = 0; y < h; ++y) {
-        uint8_t* dst = dest + yOff * y;
-        for (size_t x = 0; x < w; x++) {
-            const uint32_t k = scast<uint32_t>(alpha & 0x7);
-            if (0 == k) {
-                *dst = a0;
-            } else if (1 == k) {
-                *dst = a1;
-            } else if (a0 > a1) {
-                *dst = ((8 - k) * a0 + (k - 1) * a1) / 7;
-            } else if (k >= 6) {
-                *dst = (k == 6) ? 0 : 255;
-            } else {
-                *dst = ((6 - k) * a0 + (k - 1) * a1) / 5;
-            }
-
-            alpha >>= 3;
-            dst += xOff;
-        }
-        if (w < 4) {
-            alpha >>= (3 * (4 - w));
-        }
-    }
-}
 
 void DecompressBC3_MY(const void* inputBlocks, Bitmap<PixelRgba>& output) {
     const uint8_t* src = rcast<const uint8_t*>(inputBlocks);
@@ -471,12 +469,8 @@ void DecompressBC3_MY(const void* inputBlocks, Bitmap<PixelRgba>& output) {
     for (size_t y = 0; y < output.height; y += 4) {
         for (size_t x = 0; x < output.width; x += 4) {
             uint8_t* dst = dest + (y * output.width + x) * 4;
-
-            DecodeBC3AlphaBlock(dst + 3, 4, 4, 4, output.width * 4, src);
-            src += 8;
-
-            DecodeBCColorBlock<true>(dst, 4, 4, 4, output.width * 4, src);
-            src += 8;
+            bcdec_bc3(src, dst, static_cast<int>(output.width * 4));
+            src += BCDEC_BC3_BLOCK_SIZE;
         }
     }
 }
@@ -601,9 +595,38 @@ int PackBump(int argc, Char** argv) {
     }
 
     const bool linearGloss = !paramL.empty() && paramL.front() == _T('g');
-    const int quality = !paramQ.empty() ? std::stoi(paramQ) : 2;
+    int quality = !paramQ.empty() ? std::stoi(paramQ) : 2;
+
+    if (quality < 0) {
+        quality = 0;
+    } else if (quality >= kNumCompressors) {
+        quality = static_cast<int>(kNumCompressors - 1);
+    }
 
     Cout << _T("Using quality level ") << quality << std::endl;
+
+#ifdef ENABLE_NVTT3
+    if (quality == 3) {
+        void* hDll = LoadLibraryW(_T("nvtt30106.dll"));
+        if (!hDll) {
+            quality = 2;
+        } else {
+            func_nvttCreateCPUInputBuffer = reinterpret_cast<decltype(func_nvttCreateCPUInputBuffer)>(GetProcAddress(hDll, "nvttCreateCPUInputBuffer"));
+            func_nvttDestroyCPUInputBuffer = reinterpret_cast<decltype(func_nvttDestroyCPUInputBuffer)>(GetProcAddress(hDll, "nvttDestroyCPUInputBuffer"));
+            func_nvttEncodeBC3CPU = reinterpret_cast<decltype(func_nvttEncodeBC3CPU)>(GetProcAddress(hDll, "nvttEncodeBC3CPU"));
+
+            if (!func_nvttCreateCPUInputBuffer || !func_nvttDestroyCPUInputBuffer || !func_nvttEncodeBC3CPU) {
+                quality = 2;
+            }
+        }
+
+        if (quality == 2) {
+            Cerr << _T("Failed to load nvtt3 dll!") << std::endl << _T("Changing quality level to 2.") << std::endl;
+        }
+    }
+#endif
+
+    Cout << _T("This will use \"") << kCompressorsNames[quality] << _T("\" compressor") << std::endl;
 
     fs::path pathNormalmap, pathGlossmap, pathHeightmap, pathOutput;
 
@@ -750,18 +773,7 @@ int PackBump(int argc, Char** argv) {
         const size_t compressedMipSize = ((normalMip.width / 4) * (normalMip.height / 4)) * 16;
         compressedMip.resize(compressedMipSize);
 
-        switch (quality) {
-            case 0:
-                CompressBC3_STB(normalMip, compressedMip.data());
-                break;
-            case 1:
-                CompressBC3_Squish(normalMip, compressedMip.data());
-                break;
-            case 2:
-            default:
-                CompressBC3_RGBCX(normalMip, compressedMip.data());
-                break;
-        }
+        CompressBC3(quality, normalMip, compressedMip.data());
 
         const size_t originalMipSize = normalMip.width * normalMip.height * BytesPerPixel<PixelRgba>();
         Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
@@ -816,18 +828,7 @@ int PackBump(int argc, Char** argv) {
         const size_t compressedMipSize = ((bumpXMip.width / 4) * (bumpXMip.height / 4)) * 16;
         compressedMip.resize(compressedMipSize);
 
-        switch (quality) {
-            case 0:
-                CompressBC3_STB(bumpXMip, compressedMip.data());
-                break;
-            case 1:
-                CompressBC3_Squish(bumpXMip, compressedMip.data());
-                break;
-            case 2:
-            default:
-                CompressBC3_RGBCX(bumpXMip, compressedMip.data());
-                break;
-        }
+        CompressBC3(quality, bumpXMip, compressedMip.data());
 
         const size_t originalMipSize = bumpXMip.width * bumpXMip.height * BytesPerPixel<PixelRgba>();
         Cout << _T("Done, compressed ") << originalMipSize << _T(" bytes to ") << compressedMipSize << _T(" bytes") << std::endl;
@@ -993,6 +994,7 @@ int Main(int argc, Char** argv) {
 
 
 // Changelog:
+// v0.7 - added nvtt3 library and option to use it (Windows only atm)
 // v0.6 - added mode to decompose bump and bump# files back to normalmap gloss and heightmap
 // v0.5 - added Kaiser resample filter to stbi_image_resize library and using it by default now
 // v0.4 - added RGBCX BC compression for even better quality
